@@ -1,0 +1,714 @@
+---
+title: "Problem Sets Financial Risk Management"
+output:
+  pdf_document: default
+  html_document: default
+---
+Problem Set 1:
+
+In a first step, we are going to install various packages that will be needed to execute specific functions or to plot charts.
+```{r, eval=FALSE}
+install.packages('ggplot2') 
+install.packages('forecast')
+install.packages('xts')
+install.packages('fBasics')
+install.packages('tseries')
+install.packages('ggfortify')
+install.packages('rugarch')
+install.packages('fGarch')
+install.packages('quantmod')
+install.packages('dygraphs')
+
+  library(ggplot2)
+  library(forecast)
+  library(xts)
+  library(fBasics)
+  library(tseries)
+  library(ggfortify)
+  library(rugarch)
+  library(fGarch)
+  library(quantmod)
+  library(dygraphs)
+
+options(scipen = 99)
+```
+
+We load the data from a csv-file into our R-notebook and transform it into a time-series. Our data consists of daily historical adjusted closing prices in USD of Bank of America stocks for the time period 01/2000 until 12/2017 as shown below (we include the last closing price in year 1999 to have log-returns throughout the stated time period).  
+```{r}
+data <- read.csv("BAC.csv", header=TRUE) #load csv file
+ts <- xts(x=data[-1], order.by = as.Date(data$Date)) #transform to time series and sort by date
+remove(data)
+periodicity(ts) #check that the sample was ordered properly
+```
+
+Exercise 1: Time Series Analysis
+a)
+In the following exercise, we provide evidence for stylized facts of financial time-series.
+
+Time-variability of volatility:
+```{r}
+#compute the log-return series by calculating the difference in log-prices:
+ts$logret <- diff(log(ts$Adj.Close))
+ts <- ts[-1,] #delete the first row as it includes "NA" for log-returns
+
+# to highlitght the time-varying volatility, we create annualized monthly volatilities of the log-returns
+monthly <- apply.monthly(ts$logret, FUN= sd)
+monthly$vola <- (monthly$logret)*sqrt(12) #annualize the monthly volatilities
+autoplot(monthly$vola)
+```
+From the chart above which shows the volatility at time t, we see that the volatility of our financial time-series appears to vary a lot over time.
+
+Extreme returns appear in clusters:
+```{r}
+#Dataset for plotting: 
+ts.plot <- ts$logret
+#Find the 1% and 99% quantiles
+ts.plot.q01 <- quantile(ts.plot,0.01)
+ts.plot.q99 <- quantile(ts.plot,0.99)
+#Assigning a name to the log returns of our time series
+colnames(ts.plot) <- "LogReturns"
+#Addind the quantiles to the data set for plotting purposes
+ts.plot$horizontal_line01 <- ts.plot.q01
+ts.plot$horizontal_line99 <- ts.plot.q99
+#Plot the log returns with horizontal lines for the 1% and 99% quantile
+plot(ts.plot$LogReturns,main='Log returns over time', xlab='Date', ylab='Returns')
+lines(ts.plot$horizontal_line01, col="red")
+lines(ts.plot$horizontal_line99, col="red")
+```
+The chart above shows the returns compared to a threeshold represented as a red line that represents the quantiles 1% and 99%. As expected with a financial times-series of returns, most extreme returns happens in cluster. We can clearly see the impact of the financial crisis of 2008 as most of the extreme returns appears to happen at that time. 
+
+Fat-tailed return distribution:
+```{r}
+#show the distribution of log-returns in a histogram: 
+gghistogram(ts$logret, add.normal = T) + 
+  xlab("log returns") + ylab("Frequency") + theme_bw() #Red line is a normal distribution
+
+#report the skewness and excess kurtosis:
+skewness(ts$logret) #negative value for skewness indicates asymmetric distribution
+kurtosis(ts$logret) #high excess kurtosis indicates heavy tails --> leptokurtic
+
+```
+From the histogram aboev, we see that the conditional expected return is very concentrated around its mean 0 (stylized fact). Moreover, the return distribution has more extreme returns than a normal distribution. This is also indicated by the high value for excess kurtosis of 26.41. Moreover, if we look at the skewness, it is negatiev and therefore shows that the historical returns of Bank of America stocks are slightly asymmetrically distributed (to the left) compared to a normal distribution. 
+
+In a next step, we create a QQ-plot to emphasize that our log-return's distribution has fatter tails than a normal distribution.
+```{r}
+qqnorm(ts$logret, main = "Normal Q-Q Plot") ; qqline(ts$logret, col="red")
+```
+The QQ-plot above gives us a visualisation of how our times-serie behaves compared to a normal distribution. Looking at it, we can  conclude that our times-serie of returns is leptokurtic with heavy-tails.
+
+At last, we run an autocorrelation function to show that our log-return series has no forthright serial correlation. In addition, we compare the correlogram with the one of squared log-returns which can be interpreted as a proxy for risk. 
+```{r}
+#use the functions from the ggplot2 package
+ggAcf(ts$logret,lag.max = 30) + ggtitle("Correlogram of log-returns") #ACF
+Box.test(ts$logret, lag=30, type = "Lj") #Box-Ljung Test
+
+#calculate squared returns as a proxy for risk and perform ACF again
+ts$logret2 <- ts$logret^2
+ggAcf(ts$logret2, lag.max = 30) + ggtitle("Correlogram of squared log-returns")
+Box.test(ts$logret2, lag=30, type = "Lj")
+```
+The ACF of log-returns show serial autocorrelation for different lags. However, no clear pattern is observable as we see autocorrelation in small and large lags. The test-statistic of the Ljung-Box test heavily rejects the null-hypothesis (X-squared = 244.09). Hence, the log-returns are not iid. In contrast, the ACF plot of sqaured log-returns shows clearer serial dependence which confirms the presence of volatility clustering. This is also shown by the Ljung-Box test statistic (X-squared = 4966.1) which rejects the Null-hypothesis that squared log-returns are not distinguishable from a White Noise series. In other words, the correlogram of squared log-returns provides evidence against the iid hypothesis. 
+This presence of strong autocorrelation indicates that the time series of BAC returns follows an autoregressive conditional heteroscedasticity process that could be approximate by a GARCH model.
+
+To sumamrize, our times series has a lot of characteristics that are typical for financial returns: variation of the volatility over time, extreme returns happening in cluster, a fat-tails and leptokurtic distribution, some seril correlation present in the return serie but a really strong serial correlation in the squared returns. 
+
+b)
+Regression analysis of the squared returns on the positive and negative parts of the lagged returns.
+```{r}
+y <- ts$logret2 #dependent variable are the squared returns
+x1 <- lag(ts$logret2,1) #first regressor is lagged squared return series
+x2 <- pmax(lag(ts$logret,1),0) #beta1 corresponds to positive values only of lagged returns
+x3 <- pmin(lag(ts$logret,1),0) #beta2 corresponds to negative values only of lagged returns
+fit <- lm(y ~ x1 + x2 +x3, na.action=na.exclude) 
+names(fit$coefficients) <- c('intercept','rho','beta1','beta2') #name coefficients
+summary(fit) #display the regression output
+```
+If we interpret squared log returns as the variance of the time series, the coefficients beta1 and beta2 indicates the influence of a postive return at time t-1 on the variance at time t, respectively the influence of a negative one. It indicates that negative returns have a larger impact on future variance than positive returns. This asymmetric volatility phenomenon is known as the leverage effect. In practice this means that negative returns increase the leverage of a firm (due to lower equity) which is associated with higher volatility. With this in mind, we should thus use a GJR model instead of a simple GARCH model because the former one captures this leverage effect. 
+
+This strategy is called "Contrarian Strategy". As the squared log-returns can be interpreted as a proxy for risk, we check whether the risk tends to increase or decrease following a positive or negative return in the previous period. 
+
+We find significant coefficient estimates for all explaining variables. The positive coefficient of "rho" confirms our previous results that squared log-returns depend on previous lags. Furthermore, the positive coefficient of beta1 shows that an increase of 1% of the positive return in the previous period will increase the squared return at time t by 0.04% (model is log-log, hence, the coefficients are the marginal effects). In contrast, a negative return in t-1 tends to decrease the squared log-retuns in the next period. 
+
+c)
+```{r}
+#GARCH(1,1)
+#demean the return series:
+ts$demean <- ts$logret-mean(ts$logret)
+
+spec <- ugarchspec(mean.model=list(armaOrder=c(0,0), include.mean=F),
+                   variance.model=list(model='sGARCH', garchOrder=c(1,1)))
+garch11 <- ugarchfit(spec=spec,data=ts$demean)
+m <- ugarchfit(spec=spec,data=ts$logret)
+df <- coef(m)[4] # Estimated degrees of freedom of Student-t residuals
+csd <- ugarchforecast(m,n.ahead = 1); csd <- as.numeric(sigma(csd)) # Forecast tomorrows conditional standard deviation.
+
+#ARMA(2,2) with Student-t distribution of residuals (default = Gaussian)
+spec <- arfimaspec(mean.model=list(armaOrder=c(2,2)), distribution.model='std')
+arma22 <- arfimafit(spec=spec,data=ts$logret)
+
+#GJR-GARCH 
+spec <- ugarchspec(mean.model=list(armaOrder=c(0,0)),
+                   variance.model=list(model='gjrGARCH', garchOrder=c(1,1)))
+gjrgarch11 <- ugarchfit(spec=spec,data=ts$logret)
+
+
+#Goodness of fit comparaison:
+#Classical methods such as the R squared are not possible as a GARCH assumes a perfect fit. Therefore we need alternative measure
+
+#Likelihood comparaison
+#We can compare the garch and the gjr as they are nested. 
+loglgarch <- likelihood(garch11) 
+loglgjr <- likelihood(gjrgarch11) 
+lrstat <- 2*(loglgjr-loglgarch)
+p.val <- 1-pchisq(lrstat,df=1) # We must restricit one parameter of the GJR model to get the GARCH
+p.val > 0.05
+p.val
+# False, we reject the null. The unrestricted model applies. Therefore the gjr is better suited, 
+
+
+#Infocriteria comparaison
+infocriteria(garch11)
+infocriteria(arma22)
+infocriteria(gjrgarch11)
+#The lower, the better is the fit
+```
+Based on what we said before, on might think that the GJR model performs better than a GARCH or ARMA model for our time series (autorrelation and levarage effet). To see whether this hypothesis holds, we perform a comparison between an ARMA(2,2) model, a GARCH(1,1) and a GJR(1,1) by using information criterias and likelihood ratio tests.
+Based on the information criterias, the model that performs the best is the GJR(1,1) followed by the GARCH(1,1) (Except with the BIC which states the GARC(1,1) being better than the GJR(1,1)) and the ARMA(2,2) being the worst one. Based on the results of (a) et (b) this was expected as we have seen that the volatility is not constant meaning that models which allow it to be variable will usualy perform better. Moreover, as we saw some leverage effect, this result seems to be in line with our hypothesis of the GJR(1,1) being the most performing model. However, as the GARCH(1,1) model is nested in the GJR(1,1) model, we want to perform a likelihood ration test. The result of it shows that the GJR is better suited as we rejects de null hypothesis of the restricted model (i.e. GARC(1,1)) is better suited (p_values ≈ 0 < 0.05).
+
+
+d)
+```{r}
+# Calculate the standardized residuals
+z <- ts$demean/sigma(garch11)
+# Calculate the squared standardized residuals
+z2 <- z^2
+
+# Check for serial autocorrelation
+ggAcf(z,lag.max = 20) + ggtitle("ACF of standardized residuals")
+ggAcf(z2,lag.max = 20) + ggtitle("ACF of squared standardized residuals")
+# Check if assumed distribution is reasonable
+qqnorm(z) ; qqline(z)
+
+```
+From the ACF of standardized residuals we see that they behave like a white noise series. The QQ-plot shows the standardized residuals from the GARCH(1,1) on the y-axis against the reference Student t-distribution (quantiles on x-axis). This shows that the model cannot fully capture the distribution in the tails but it does a better job compared to the QQ-plot in exercise a). Since we base our model on the assumption of a Student's t-distribution, we could improve the fit by focusing on the tails only in Extreme Value Theory. In contrast to GARCH, the Extreme Value Theory does not require a prior assumption about the return distribution.
+
+Exercise 2: Value-at-Risk (VaR) and Expected Shortfall (ES)
+a)
+```{r}
+#create a subsample for historical data until September 12, 2008 
+subts <- ts["2000-01-03::2008-09-12"]
+position <- 1000000
+
+
+# VAR from the empirical distribution
+VAR95 <- position*(1-exp(quantile(subts$logret,0.05)))
+VAR99 <- position*(1-exp(quantile(subts$logret,0.01)))
+as.numeric(VAR95)
+as.numeric(VAR99)
+
+# ES from the empirical distribution
+ES95 <- mean(position*(1-exp(subts$logret[subts$logret<quantile(subts$logret,0.05)])))
+ES99 <- mean(position*(1-exp(subts$logret[subts$logret<quantile(subts$logret,0.01)])))
+ES95
+ES99
+
+```
+We observe much higher values for VaR and ES with regards to the 99% measures. This indicates that our data has large outliers that are not taken into account in our VaR_95%. Also, the ES is larger than the VaR as this risk measure captures all observations that fall within the pre-defined threshold (alpha) and takes their average.  
+
+
+b)
+```{r}
+#Estimate Garch model for time period
+spec <- ugarchspec(mean.model=list(armaOrder=c(0,0), include.mean=F),
+                   variance.model=list(model='sGARCH', garchOrder=c(1,1)),
+                   distribution.model='std')
+m <- ugarchfit(spec=spec,data=subts$logret)
+df <- coef(m)[4] # Estimated degrees of freedom of Student-t residuals
+csd <- ugarchforecast(m,n.ahead = 1); csd <- as.numeric(sigma(csd)) # Forecast tomorrows conditional standard deviation.
+
+
+# VAR and ES from GARCH
+# Simulate the loss distribution.
+nrow(subts$logret) #2187 obsercation
+X <- runif(2187,min=0,max=1) # Draw 2187 values uniformly in [0,1]
+Y <- qt(X,df) # Convert to Student-t. 
+L <- position*(1-exp(csd*Y + mean(subts$logret))) # COmpute loss distribution
+
+
+#Find the quantiles for the VAR measures
+VAR95_garch <- quantile(L,0.05)
+VAR99_garch <- quantile(L,0.01)
+as.numeric(VAR95_garch)
+as.numeric(VAR99_garch)
+
+#Calculate the mean under the quantiles for the ES measures
+ES95_garch <- mean(L[L<VAR95_garch])
+ES99_garch <- mean(L[L<VAR99_garch])
+ES95_garch
+ES99_garch 
+
+```
+The GARCH model produces higher VAR and ES measures than the empirical historic method. It is usualy prefered to compute these measures with a GARCH model as we are interested in their conditional value for next period. 
+
+
+c)
+```{r}
+seploss <- ts["2008-09-15"]
+position*(1-exp(seploss$logret))
+
+```
+The real loss on September 15, 2008 is bigger than the VAR99 or the ES99 because it is situated under the 1% quantile or the average loss under the 1% quantile. It shows that the two risk measures are useful in reality but they do not represent the maximum loss. ONe therefore needs to pay attention to his interpretations of these risk measure to avoid taking wrong decisions. The measure calculated with the GARCH(1,1) model are closer to the loss of september 15th. It indicates that simulating the distribution of losses might provide a better estimation of risks measure than just taking into consideration historical losses.
+
+d)
+```{r}
+# Recompute the risk measures for the period up to October 6 2008
+subts2 <- ts["2000-01-03::2008-10-06"]
+VAR95d <- position*(1-exp(quantile(subts2$logret,0.05)))
+VAR99d <- position*(1-exp(quantile(subts2$logret,0.01)))
+VAR95d
+VAR99d
+ES95d <- mean(position*(1-exp(subts2$logret[subts$logret<quantile(subts2$logret,0.05)])))
+ES99d <- mean(position*(1-exp(subts2$logret[subts$logret<quantile(subts2$logret,0.01)])))
+ES95d
+ES99d
+
+oktloss <- ts["2008-10-7"]
+position*(1-exp(oktloss$logret))
+
+# Similar conclusion as in 1c)
+
+```
+The results previously found by estimating the loss for September 15, 2008 holds for October 6, 2008.
+
+
+Exercice 3 is not R code. It is found in the complied pdf file. 
+
+
+
+
+Problem Set 2
+Exercise 4: Extreme Value Theory (EVT) and VaR
+
+(the following calculations are based on the observation period from January 3, 2000 to September 15, 2008 as well as to October 6, 2008)
+
+a)
+The EVT focuses extreme and rare events. EVT is concerned with the tail of the distribution either by block maxima or by values above a threshold. GARCH on the other hand fits the entire distribution and is thus influenced heavivly by the center of the distribution. Therefore, if we are interested in modeling the risk, EVT might be a better approach as it only considers the tail. This means that the modeling will not be influenced by positive returns and by the center of the distribution. We need large sample sizes to apply EVT as the extreme events should be rather uncommon.
+For a GARCH model, we estimate the time series by allowing the volatility to vary over time. It is dependant on a constant term, a stochastic term (Strict white noise process) and on lagged effects from past volatility and stochastic values. 
+There are two methods to estimate the extreme value distribution. The first is through block maxima where we divide the sample into many subsamples and take the highest value for each subsample. Then, these maximas are distributed in three ways (Fr?chet, Gumbel and Weibull) depending on the original distribution. The second is to set a threshold and model all values that exceed this threshold. The resulting distribution (Pareto type I and II and exponential) again depend on the original distriubtion. For financial time series, the retruns are usually a Fr?chet or a Pareto type I distribution.   
+
+
+b)
+Both are approaches of the peaks over threshold (POT) to apply the EVT. Which method is chosen - GPD or Hill - depends on factors like how much knowledge one has of the data. GPD, as the name suggests, is more general than the Hill method as it can be applied to all three types of tail distributions: ordinary Pareto distribution, exponential distribution and short-tailed Pareto distribution. In contrast, the Hill method applies for the Fr?chet distribution with a shape parameter greater than 0. This can be shown by the equation in c). The shape parameter can by definition not be negative as the difference in log-values is non-negative for sorted log-returns greater or equal to threshold u. As a result, this approach is only valid for fat-tailed data which is the case for Bank of America. 
+
+If the underlying loss distribution is Fr?chet, then the Hill estimator is the
+maximum likelihood estimate of the tail thickness parameter. The weakness lies in the determination of the threshold. A trade-off exists between choosing less observations in the tail for a low bias or reducing the variance by using more data. We can use the eyeball method to find the optimal threshold in Hill plots or we check for mean excess plots in GPD where the function is linear afterwards. 
+
+c)
+```{r}
+
+class(subts$logret) #log returns are of type xts (time-series)
+return.sorted <- sort(coredata(subts$logret)) # coredata converts r to a normal array.
+return2.sorted <- sort(coredata(subts2$logret)) #return2 refers to the data sample up to October 6, 2008
+
+#up to September 15, 2008
+CT <- 5:500 #define the range of the threshold CT
+T <- length(return.sorted)
+
+iota <- numeric(length(CT))
+for (i in 1:length(CT)) {
+  u <- return.sorted[CT[i]+1]
+  iota[i] <- 1/mean(log(return.sorted[1:CT[i]]/u))
+}
+#Hill plot for different values of CT
+plot(CT,iota,ylab='Tail index', type = "l", main="Data to September 15, 2008")
+
+
+#----------------------------------------------------------------
+
+
+#up to October 6, 2008
+CT <- 5:500 #define the range of the threshold CT
+T <- length(return2.sorted)
+
+iota <- numeric(length(CT))
+for (i in 1:length(CT)) {
+  u <- return2.sorted[CT[i]+1]
+  iota[i] <- 1/mean(log(return2.sorted[1:CT[i]]/u))
+}
+#Hill plot for different values of CT
+plot(CT,iota,ylab='Tail index', type = "l", main="Data to October 6, 2008")
+
+
+```
+From the two graphs, we see that the tail index is lower for the observation window up to October 6, 2008. This finding is not surprising as many extreme returns happened between the two observation periods. Hence, the return distribution of Bank of America shares has fatter tails when we increase the observation period to October 6, 2008. 
+
+We notice that the Hill estimator is rather unstable when we choose only a small number of observations in the tail. The course of the plots indicates that the tail gets thicker with higher values for CT as the tail index is the inverse of the shape parameter. The estimation bias can be reduced by increasing CT on the x-axis. However, the estimation variance will increase too. Finally, the Hill estimators tend to converge when we include more observations beyond the threshold.
+
+d)
+```{r}
+#up to September 15, 2008
+#define levels for the two Hill plots at 1 and 5 percent
+p1 <- 0.01
+p5 <- 0.05
+T <- length(return.sorted)
+
+var_99 <- numeric(length(CT))
+var_95 <- numeric(length(CT))
+
+for (i in 1:length(CT)) {
+  u <- return.sorted[CT[i]+1]
+  iota[i] <- 1/mean(log(return.sorted[1:CT[i]]/u))
+  var_99[i] <- u*(CT[i]/(T*p1))^(1/iota[i])
+  var_95[i] <- u*(CT[i]/(T*p5))^(1/iota[i])
+}
+#Hill plot for VaR at 95%
+plot(CT,iota,ylab='Tail index',col = "blue", type="l",main="Data to September 15, 2008")
+par(new = TRUE)
+plot(CT,position*(1-exp(var_95)), type = "l", xaxt = "n", yaxt = "n",
+     ylab = "", xlab = "",col = "red",lty = 2)
+axis(side = 4)
+legend("top", c("Tail index", "VaR(95%)"),
+       col = c("blue", "red"), lty = c(1, 2))
+
+#Hill plot for VaR at 99%
+plot(CT,iota,ylab='Tail index',col = "blue", type="l",main="Data to September 15, 2008")
+par(new = TRUE)
+plot(CT,position*(1-exp(var_99)), type = "l", xaxt = "n", yaxt = "n",
+     ylab = "", xlab = "",col = "red",lty = 2)
+axis(side = 4)
+legend("top", c("Tail index", "VaR(99%)"),
+       col = c("blue", "red"), lty = c(1, 2))
+
+#----------------------------------------------------------------
+
+#up to October 6, 2008
+
+T <- length(return2.sorted)
+for (i in 1:length(CT)) {
+  u <- return2.sorted[CT[i]+1]
+  iota[i] <- 1/mean(log(return2.sorted[1:CT[i]]/u))
+  var_99[i] <- u*(CT[i]/(T*p1))^(1/iota[i])
+  var_95[i] <- u*(CT[i]/(T*p5))^(1/iota[i])
+}
+#Hill plot for VaR at 95%
+plot(CT,iota,ylab='Tail index',col = "blue", type="l",main="Data to October 6, 2008")
+par(new = TRUE)
+plot(CT,position*(1-exp(var_95)), type = "l", xaxt = "n", yaxt = "n",
+     ylab = "", xlab = "",col = "red",lty = 2)
+axis(side = 4)
+legend("top", c("Tail index", "VaR(95%)"),
+       col = c("blue", "red"), lty = c(1, 2))
+
+#Hill plot for VaR at 99%
+plot(CT,iota,ylab='Tail index',col = "blue", type="l",main="Data to October 6, 2008")
+par(new = TRUE)
+plot(CT,position*(1-exp(var_99)), type = "l", xaxt = "n", yaxt = "n",
+     ylab = "", xlab = "",col = "red",lty = 2)
+axis(side = 4)
+legend("top", c("Tail index", "VaR(99%)"),
+       col = c("blue", "red"), lty = c(1, 2))
+
+```
+From the VaR(99%) charts of both observation periods, we can generally infer that the VaR constantly increases after a certain threshold. This is due to the statistical properties of VaR that show that this risk measure is mainly driven by the tail index that appears in the power. Generally, if the tail index decreases, our VaR(99%) increases. When looking at the right axis that displays the VaR expressed in dollars, we see that the VaR is higher for the data period up to October 6, 2008 for both quantiles 5% and 1%. 
+
+For the VaR(95%), we see that the values are much lower and and more stable compared to VaR(99%) as this measure disregards the more extreme outcomes. From this finding we take that moving further into the center of the distribution of the underlying data, EVT becomes inaccurate.
+
+e)
+Following the eyeball method, we choose the optimal threshold CT where the tail index seems to be stable. We report that a CT between 200 and 250 seems to be optimal for both observation windows. As the tail index for data up to October 6, 2008 is lower we conclude that our log-return distribution has fatter tails.
+
+For the corresponding VaR(p) in both samples, we use a CT of 250 as this is the maximum threshold we would consider to be optimal. For the observation period until September 15, 2008 we get a VaR(99%) of USD 60'911.09 and for VaR(95%) we get USD 27'591.61. Equivalently, we get a VaR(99%) of USD 64'324 and a VaR(95%) of USD 28'718.16 for the sample until October 6, 2008. We find higher VaR(p) in the extended sample and conclude again that between September 15, 2008 and October 6, 2008 the shares of BAC experienced extreme losses.
+ 
+```{r}
+#Choose a threshold between 200 and 250
+
+#September sample
+T <- length(return.sorted)
+CT <- 250
+u <- return.sorted[251]
+iota <- 1/mean(log(return.sorted[1:250]/u))
+var_99_evt <- position*(1-exp(u*(250/(T*p1))^(1/iota)))
+var_95_evt <- position*(1-exp(u*(250/(T*p5))^(1/iota)))
+var_99_evt
+var_95_evt
+
+#October sample
+T <- length(return2.sorted)
+CT <- 250
+u <- return2.sorted[251]
+iota <- 1/mean(log(return2.sorted[1:250]/u))
+var_99_evt <- position*(1-exp(u*(250/(T*p1))^(1/iota)))
+var_95_evt <- position*(1-exp(u*(250/(T*p5))^(1/iota)))
+var_99_evt
+var_95_evt
+
+```
+
+
+f)
+From the previous exercise we find in general lower values for VaR(p) in both estimation windows using EVT compared to the GARCH(1,1) model with t-distribution from problem set 1. Our results for VaR(p) are closer to the values optained from the historical VaR-estimation. We conclude that the VaR estimated in EVT remains an unconditional risk measure like the empirical VaR and cannot account for the time-vaying and conditional variance as in GARCH. 
+
+g)
+```{r}
+meanret <- mean(subts$logret)
+x <- subts$logret-meanret
+
+spec <- ugarchspec(mean.model=list(armaOrder=c(0,0), include.mean=F),
+                   variance.model=list(model='sGARCH', garchOrder=c(1,1)))
+garch11 <- ugarchfit(spec=spec,data=subts$logret)
+z <- x/sigma(garch11) # Get standardized residuals.
+sigma <- sigma(ugarchforecast(garch11,n.ahead=1)) # Forecast next day conditional standard deviation.
+
+z.sorted <- sort(coredata(z))
+CT <- 5:500
+T <- length(z.sorted)
+iota <- numeric(length(CT))
+var_95 <- numeric(length(CT))
+var_99 <- numeric(length(CT))
+
+for (i in 1:length(CT)) {
+  u <- z.sorted[CT[i]+1]
+  iota[i] <- 1/mean(log(z.sorted[1:CT[i]]/u))
+  q5 <- u*(CT[i]/(T*p5))^(1/iota[i]) # Get quantile of standardized residuals for VaR(95%)
+  q1 <- u*(CT[i]/(T*p1))^(1/iota[i]) # Get quantile of standardized residuals for VaR(99%)
+  var_95.r <- meanret + sigma*q5
+  var_95[i] <- position*(1-exp(var_95.r))
+  var_99.r <- meanret + sigma*q1
+  var_99[i] <- position*(1-exp(var_99.r))
+}
+#Hill plot for VaR at 95%
+plot(CT,iota,ylab='Tail index',col = "blue", type ="l",main="Data to September 15, 2008")
+par(new = TRUE)
+plot(CT,var_95, type = "l", xaxt = "n", yaxt = "n",
+     ylab = "", xlab = "",col = "red",lty = 2)
+axis(side = 4)
+legend("top", c("Tail index", "VaR(95%)"),
+       col = c("blue", "red"), lty = c(1, 2))
+
+#Hill plot for VaR at 99%
+plot(CT,iota,ylab='Tail index',col = "blue", type = "l",main="Data to September 15, 2008")
+par(new = TRUE)
+plot(CT,var_99, type = "l", xaxt = "n", yaxt = "n",
+     ylab = "", xlab = "",col = "red",lty = 2)
+axis(side = 4)
+legend("top", c("Tail index", "VaR(99%)"),
+       col = c("blue", "red"), lty = c(1, 2))
+
+
+#----------------------------------------------------------------
+
+#up to October 6, 2008
+
+meanret <- mean(subts2$logret)
+x <- subts2$logret-meanret
+
+spec <- ugarchspec(mean.model=list(armaOrder=c(0,0), include.mean=F),
+                   variance.model=list(model='sGARCH', garchOrder=c(1,1)))
+garch11 <- ugarchfit(spec=spec,data=subts2$logret)
+z <- x/sigma(garch11) # Get standardized residuals.
+sigma <- sigma(ugarchforecast(garch11,n.ahead=1)) # Forecast next day conditional standard deviation.
+
+z.sorted <- sort(coredata(z))
+CT <- 5:500
+T <- length(z.sorted)
+iota <- numeric(length(CT))
+var_95 <- numeric(length(CT))
+var_99 <- numeric(length(CT))
+
+for (i in 1:length(CT)) {
+  u <- z.sorted[CT[i]+1]
+  iota[i] <- 1/mean(log(z.sorted[1:CT[i]]/u))
+  q5 <- u*(CT[i]/(T*p5))^(1/iota[i]) # Get quantile of standardized residuals for VaR(95%)
+  q1 <- u*(CT[i]/(T*p1))^(1/iota[i]) # Get quantile of standardized residuals for VaR(99%)
+  var_95.r <- meanret + sigma*q5
+  var_95[i] <- position*(1-exp(var_95.r))
+  var_99.r <- meanret + sigma*q1
+  var_99[i] <- position*(1-exp(var_99.r))
+}
+#Hill plot for VaR at 95%
+plot(CT,iota,ylab='Tail index',col = "blue", type ="l",main="Data to October 6, 2008")
+par(new = TRUE)
+plot(CT,var_95, type = "l", xaxt = "n", yaxt = "n",
+     ylab = "", xlab = "",col = "red",lty = 2)
+axis(side = 4)
+legend("top", c("Tail index", "VaR(95%)"),
+       col = c("blue", "red"), lty = c(1, 2))
+
+#Hill plot for VaR at 99%
+plot(CT,iota,ylab='Tail index',col = "blue", type = "l",main="Data to October 6, 2008")
+par(new = TRUE)
+plot(CT,var_99, type = "l", xaxt = "n", yaxt = "n",
+     ylab = "", xlab = "",col = "red",lty = 2)
+axis(side = 4)
+legend("top", c("Tail index", "VaR(99%)"),
+       col = c("blue", "red"), lty = c(1, 2))
+
+```
+The charts above are based on the conditional-EVT approach from standardized GARCH(1,1) residuals. The results are similar to the graphs discussed in d), where the VaR(95%) is more stable and does not increase as much with greater CT than the VaR(99%). Compared to the values for EVT-VaR(p) from e), we see that the values increased substantially even though the tail index for both samples slightly increased. We find that due to standardizing, our sorted log-returns are now much more negative compared to before.   
+
+Since we found VaR(p) values in this exercise closer to the ones from GARCH(1,1), we believe that this is due to the underlying distribution of the Hill estimator in EVT which is the Fr?chet distribution. This type of distribution resemples also the fatter-tailed student t-distribution. Furthermore, the higher values under conditional-EVT arise from the fact that even more focus is shifted on the extreme tails compared to standard EVT in the previous exercises. This results in much higher VaR(p) values in especial for the 99%-VaR. 
+
+
+Problem set 3
+Exercise 5: Liquidity Risk
+
+a)
+```{r}
+#in a first step, we import the new data set for proportional effective spreads
+dat = read.csv("BAC2.csv")
+dat1 <- dat$Effective.Spread..in.percent./100 #Value are in percentage
+ts.spread <- xts(x=dat1, order.by = as.Date(dat$Date)) #transform to time series and
+position  # From Problem set 1. Same position for this exercice
+
+#first initialize some variables
+logL <- matrix(0,nrow=3,ncol=3)
+params <- matrix(0,nrow=3,ncol=3)
+aic <- matrix(0,nrow=3,ncol=3)
+bic <- matrix(0,nrow=3,ncol=3)
+
+#we make a for loop to estimate in total 16 ARMA models and save the information criteria
+for (p in 1:3) {
+  for (q in 1:3) {
+    spec <- arfimaspec(mean.model=list(armaOrder=c(p,q)), distribution.model='norm')
+    arma <- arfimafit(spec=spec,data=ts.spread)
+    # logL[p,q] <- likelihood(arma)
+    # params[p,q] <- length(coef(arma))
+    aic[p,q] <- infocriteria(arma)[1]
+    bic[p,q] <- infocriteria(arma)[2]
+  }
+}
+aic_pq <- which(aic==min(aic),arr.ind=TRUE) # Get (p,q)-pair that minimizes AIC.
+bic_pq <- which(bic==min(bic),arr.ind=TRUE) # Get (p,q)-pair that minimizes BIC.
+print(paste0('Best model according to AIC: ARMA(',aic_pq[1],',',aic_pq[2],')'))
+print(paste0('Best model according to BIC: ARMA(',bic_pq[1],',',bic_pq[2],')'))
+#Results from information criteria are not clear. ARMA(1,1) is nested in ARMA(3,3). -> LogLikelihood ratio test
+
+spec11 = arfimaspec(mean.model=list(armaOrder=c(1,1)), distribution.model='norm')
+arma11 <- arfimafit(spec=spec11,data=ts.spread)
+spec33 = arfimaspec(mean.model=list(armaOrder=c(3,3)), distribution.model='norm')
+arma33 <- arfimafit(spec=spec33,data=ts.spread)
+
+loglarma11 <- likelihood(arma11)
+loglarma33 <- likelihood(arma33)
+lrstat <- 2*(loglarma33-loglarma11) #arma33 is unrestricted and arma11 is restricted
+p.val <- 1-pchisq(lrstat, df=5) # We restrict 5 parameters
+
+p.val>0.05 # We reject the Null. The unrestricted model applies (ARMA(3,3)). 
+```
+We chose the ARMA(3,3) model. From the information criteria two models came out to be the best, ARMA(1,1) and ARMA(3,3). After performing a loglikelihood ratio test, we find ARMA(3,3) to be the best performing.
+
+b)
+```{r}
+
+# We estimate the model inculding a GARCH effect and then check if it significantly improves on the ARMA(3,3) model. 
+
+#same procedure as above
+logL <- matrix(0,nrow=3,ncol=3)
+params <- matrix(0,nrow=3,ncol=3)
+aic <- matrix(0,nrow=3,ncol=3)
+bic <- matrix(0,nrow=3,ncol=3)
+for (p in 1:3) {
+  for (q in 1:3) {
+    spec <- ugarchspec(mean.model=list(armaOrder=c(p,q)),variance.model=list(garchOrder=c(1,1)))
+    fit <- ugarchfit(spec=spec,data=ts.spread)
+    logL[p,q] <- likelihood(fit)
+    params[p,q] <- length(coef(fit))
+    aic[p,q] <- infocriteria(fit)[1]
+    bic[p,q] <- infocriteria(fit)[2]
+  }
+}
+aic_pq <- which(aic==min(aic),arr.ind=TRUE) # Get (p,q)-pair that minimizes AIC.
+bic_pq <- which(bic==min(bic),arr.ind=TRUE) # Get (p,q)-pair that minimizes BIC.
+print(paste0('Best model according to AIC: ARMA(',aic_pq[1],',',aic_pq[2],')-GARCH(1,1)'))
+print(paste0('Best model according to BIC: ARMA(',bic_pq[1],',',bic_pq[2],')-GARCH(1,1)'))
+
+# Again we have different results for the information criteria so we perform a likelihood test with arma(1,1)-garch(1,1) nested in arma(3,3)-garch(1,1)
+spec <- ugarchspec(mean.model=list(armaOrder=c(1,1)),variance.model=list(garchOrder=c(1,1)))
+armagarch11 <- ugarchfit(spec=spec,data=ts.spread)
+spec <- ugarchspec(mean.model=list(armaOrder=c(3,3)),variance.model=list(garchOrder=c(1,1)))
+armagarch33 <- ugarchfit(spec=spec,data=ts.spread)
+
+loglarmagarch11 <- likelihood(armagarch11)
+loglarmagarch33 <- likelihood(armagarch33)
+lrstat <- 2*(loglarmagarch33-loglarmagarch11) #armagarch33 is unrestricted and armagarch11 is restricted
+p.val <- 1-pchisq(lrstat, df=5) # We restrict 5 parameters
+
+p.val>0.05 # We cannot reject the Null. The restricted model applies (ARMA(1,1)-garch(1,1)). 
+
+
+infocriteria(armagarch11) [2] < infocriteria(arma33) [2]
+infocriteria(armagarch11) [1] < infocriteria(arma33) [1]
+
+```
+When we add a GARCH effect to our model, ARMA(1,1)-GARCH(1,1) is the best performing. We then compare it to the ARMA(3,3) model from (a). We find that the model with the GARCH effect does not posses a smaller information criteria. We cannot perform the loglikelihood ratio test as neither model is nested in the other. We conclude that it is not necessary to add a GARCH effect. 
+
+c)
+```{r}
+# Forecast next periods.
+farma <- arfimaforecast(arma33,n.ahead = 1)
+m <- as.numeric(fitted(farma)) # Get the conditional mean for the arma(3,3)
+cv <- as.numeric(coef(arma33)[8]) # Get the conditional standard deviation for the arma(3,3)
+f <- ugarchforecast(armagarch11,n.ahead = 1) # Get the forecast for the amra(1,1)-garch(1,1)
+m2 <- as.numeric(sigma(f))
+cv2 <- as.numeric(fitted(f))
+# Show the values
+m
+cv
+m2
+cv2
+#--> conditional mean of the spread is much higher for ARMA(3,3)
+
+# From ARMA(3,3) the next period proportional effective spread is 0.05392 and from ARMA(1,1)-GARCH(1,1) it is 0.05523
+
+# The liquidation cost of our position for both model is thus
+
+arma33cost <- (m*position)/2
+armagarch11cost <- (m2*position)/2 #Input value manually for technical reasons. 
+
+arma33cost
+armagarch11cost
+
+
+```
+
+The ARMA(3,3) model forecasts a liquidation cost of USD269.6 and the ARMA(1,1)-GARCH(1,1) forecasts one of USD39.26.
+
+
+
+d)
+```{r}
+#Create the sub sample for VaR calculations
+periodicity(ts.spread)
+subts3 <- ts["2015-01-02::2015-12-31"] #we create a subsample to have equal lenght among both data samples for BAC
+
+spec <- ugarchspec(mean.model=list(armaOrder=c(0,0), include.mean=F),
+                   variance.model=list(model='sGARCH', garchOrder=c(1,1)),
+                   distribution.model='norm')
+m3 <- ugarchfit(spec=spec,data=subts3$logret)
+csd <- ugarchforecast(m3,n.ahead = 1); csd <- as.numeric(sigma(csd)) # Forecast tomorrows conditional standard deviation.
+
+
+# VAR and ES from GARCH
+# Simulate the loss distribution.
+
+X <- runif(nrow(subts3$logret),min=0,max=1) # Draw 2187 values uniformly in [0,1]
+L <- position*(1-exp(csd*X + mean(subts3$logret))) # COmpute loss distribution
+
+
+#Find the quantiles for the VAR measures
+VAR95_garch <- -quantile(L,0.05)
+as.numeric(VAR95_garch)
+
+
+# Liquidity adjusted stressed VaR:
+#cv is the conditional standard deviation for the arma(3,3)
+as.numeric(VAR95_garch)+((((m/100)+1.96*cv)*position)/2)
+```
+
+We get a market-liquidity-adjusted stressed VaR for the 95% confidence level of USD14'040.79. The unadjusted value is USD13'982.99. 
+
+
+
+
+Exercices 6 through 10 are not R code. Our solutions to these problems are in the complied pdf file. 
+
+
